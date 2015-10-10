@@ -1,0 +1,35 @@
+[Unit]
+Description=Mesos Master
+After=docker.service
+After=fleet.service
+Requires=docker.service
+Requires=fleet.service
+
+[Service]
+Restart=on-failure
+RestartSec=20
+TimeoutStartSec=0
+EnvironmentFile=/etc/environment
+
+ExecStartPre=-/usr/bin/docker kill mesos-master.%i
+ExecStartPre=-/usr/bin/docker rm mesos-master.%i
+ExecStartPre=/usr/bin/docker pull mesosphere/mesos-master:0.24.1-0.2.35.ubuntu1404
+ExecStart=/usr/bin/sh -c "/usr/bin/docker run --rm \
+    --name=mesos-master.%i \
+    --privileged \
+    --net=host \
+    -e SERVICE_NAME=mesos-master \
+    mesosphere/mesos-master:0.24.1-0.2.35.ubuntu1404 \
+    --hostname=${COREOS_PRIVATE_IPV4} \
+    --ip=${COREOS_PRIVATE_IPV4} \
+    --zk=zk://`etcdctl get /bootstrap/mesos/zookeeper`:2181/mesos \
+    --work_dir=/var/lib/mesos/master \
+    --quorum=1"
+ExecStop=/usr/bin/docker stop mesos-master.%i
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+MachineMetadata=mesos_master=true
+X-Conflicts=mesos-master@*

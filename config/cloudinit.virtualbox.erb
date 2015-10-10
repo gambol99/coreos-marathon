@@ -1,0 +1,131 @@
+#!/bin/bash
+cat <<-'EOF' >/var/lib/coreos-vagrant/vagrantfile-user-data
+#cloud-config
+#
+#   Author: Rohith
+#   Date: 2015-06-04 13:14:14 +0100 (Thu, 04 Jun 2015)
+#
+#  vim:ts=2:sw=2:et
+#
+<%-
+  cluster = @etcd_cluster.map { |name,ip| "#{name}=http://#{ip}:2380" }.join(',')
+-%>
+
+hostname: <%= @hostname %>.<%= @domain %>
+
+resolv_conf:
+  nameservers: [ '8.8.8.8', '8.8.4.4' ]
+  searchdomains:
+    - <%= @domain %>
+  domain: <%= @domain %>
+  options:
+    rotate: true
+    timeout: 1
+
+write_files:
+  - path: /run/public.key
+    permission: 0444
+    owner: root
+    content: |
+      <%= @public_key %>
+  - path: /etc/hosts
+    permission: 0444
+    owner: root
+    content: |
+      $private_ipv4 <%= @hostname %>.<%= @domain %> <%= @hostname %>
+      127.0.0.1 localhost.<%= @domain %> localhost
+
+coreos:
+  etcd2:
+    <%- if @metadata['etcd_master'].nil? -%>
+    proxy: on
+    listen_client_urls: http://0.0.0.0:2379,http://0.0.0.0:4001
+    initial_cluster: <%= cluster %>
+    <%- else -%>
+    name: <%= @hostname %>
+    advertise_client_urls: http://$private_ipv4:2379
+    initial_advertise_peer_urls: http://$private_ipv4:2380
+    listen_client_urls: http://0.0.0.0:2379,http://0.0.0.0:4001
+    listen_peer_urls: http://$private_ipv4:2380
+    initial_cluster_token: k8s_etcd
+    initial_cluster: <%= cluster %>
+    initial_cluster_state: new
+    <%- end -%>
+  fleet:
+    public-ip: $private_ipv4
+    metadata: cluster=sbx,private_ip=$private_ipv4,host=<%= @hostname.gsub(/[0-9]*/,'') %>,<%= @metadata.map { |k,v| "#{k}=#{v}" }.join(',') %>
+  locksmith:
+    endpoint: http://127.0.0.1:2379
+  update:
+    reboot-strategy: off
+  units:
+    - name: etcd2.service
+      command: start
+      enable: true
+    - name: docker.service
+    <%- if ENV['DOCKER_MIRROR'] -%>
+      drop-ins:
+      - name: 51-docker-mirror.conf
+        content: |
+          [Service]
+          Environment="DOCKER_OPTS='--registry-mirror=http://<%= ENV['DOCKER_MIRROR'] %>:5000'"
+    <%- end -%>
+    - name: fleet.service
+      command: start
+      enable: true
+      drop-ins:
+      # TODO remove below once fixed, see https://github.com/coreos/fleet/issues/1329
+      - name: 10-dependencies.conf
+        content: |
+          [Unit]
+          After=etcd2.service
+          Wants=fleet.socket
+          After=fleet.socket
+          Requires=etcd2.service
+    - name: format-ephemeral.service
+      command: start
+      content: |
+        [Unit]
+        Description=Formats the ephemeral drive
+        Before=docker.service
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/bash -c '/usr/sbin/blkid /dev/sdb || (/usr/sbin/wipefs -f /dev/sdb && /usr/sbin/mkfs.ext4 /dev/sdb -N 3000000)'
+    - name: var-lib-docker.mount
+      command: start
+      content: |
+        [Unit]
+        Description=Mount ephemeral to /var/lib/docker
+        Requires=format-ephemeral.service
+        After=format-ephemeral.service
+        Before=docker.service
+        [Mount]
+        What=/dev/sdb
+        Where=/var/lib/docker
+        Type=ext4
+    - name: inject-ssh-key.service
+      command: start
+      content: |
+        [Unit]
+        Description=Injecting the public key
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/bash -c "/usr/bin/cat /run/public.key >> /home/core/.ssh/authorized_keys"
+    - name: settimezone.service
+      command: start
+      content: |
+        [Unit]
+        Description=Set the timezone
+
+        [Service]
+        ExecStart=/usr/bin/timedatectl set-timezone UTC
+        RemainAfterExit=yes
+        Type=oneshot
+    - name: ntpd.service
+      command: start
+EOF
+
+/usr/bin/chmod 0644 /var/lib/coreos-vagrant/vagrantfile-user-data
